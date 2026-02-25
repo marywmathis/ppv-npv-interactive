@@ -1,93 +1,114 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
+import io
+import base64
 
-# Required for Streamlit Cloud matplotlib rendering
+# Required for Streamlit Cloud
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# ---------------------------
-# CUSTOM CSS FOR WIDER SLIDERS & LARGER HANDLES
-# ---------------------------
+from reportlab.pdfgen import canvas
+
+# -----------------------------------------
+# GLOBAL CSS FOR FONTS, SLIDERS, CLEAN UI
+# -----------------------------------------
 st.markdown("""
 <style>
-/* Make sliders full width */
-div.stSlider > div[data-baseweb="slider"] {
-    width: 95% !important;
-    padding-left: 10px;
-    padding-right: 10px;
+
+/* Larger, darker text */
+html, body, [class*="css"] {
+    font-size: 18px !important;
+    color: #222 !important;
 }
 
-/* Make the slider handle (thumb) larger */
+/* Increase header size (H2) */
+h2 {
+    font-size: 30px !important;
+    font-weight: 700 !important;
+    color: #111 !important;
+}
+
+/* Wider sliders */
+div.stSlider > div[data-baseweb="slider"] {
+    width: 95% !important;
+    padding-left: 5px;
+    padding-right: 5px;
+}
+
+/* Larger slider handle */
 div[data-baseweb="slider"] div[role="slider"] {
     width: 28px !important;
     height: 28px !important;
     border-radius: 50% !important;
 }
 
-/* Increase clickable area vertically */
+/* Add vertical space for slider grabbing */
 div[data-baseweb="slider"] {
-    padding-top: 15px;
-    padding-bottom: 15px;
+    padding-top: 12px !important;
+    padding-bottom: 12px !important;
 }
+
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------
+# -----------------------------------------
 # PAGE TITLE
-# ---------------------------
+# -----------------------------------------
 st.title("🔬 Interactive Screening Test Explorer")
-st.write("Explore how sensitivity, specificity, and prevalence shape PPV, NPV, and diagnostic accuracy.")
 
-# ---------------------------
-# PRESET TEST OPTIONS
-# ---------------------------
-test_choice = st.selectbox(
-    "Select Test Type:",
-    ["FIT", "FIT-DNA (Cologuard)", "Colonoscopy", "Custom"]
+st.write(
+    "A complete teaching tool for exploring sensitivity, specificity, prevalence, predictive values, "
+    "likelihood ratios, Bayesian inference, ROC curves, prevalence effects, and real-world case examples."
 )
 
-preset_values = {
-    "FIT": (0.75, 0.95),
-    "FIT-DNA (Cologuard)": (0.92, 0.87),
-    "Colonoscopy": (0.95, 0.99)
+# -----------------------------------------
+# PRESET TESTS
+# -----------------------------------------
+preset_tests = {
+    "FIT": {"sens": 0.75, "spec": 0.95, "prev": 0.003},
+    "FIT-DNA (Cologuard)": {"sens": 0.92, "spec": 0.87, "prev": 0.003},
+    "Colonoscopy": {"sens": 0.95, "spec": 0.99, "prev": 0.01},
 }
 
-if test_choice in preset_values:
-    sens_default, spec_default = preset_values[test_choice]
+# -----------------------------------------
+# MAIN TEST SETUP
+# -----------------------------------------
+st.header("⚙️ Test Setup")
+
+test_choice = st.selectbox("Select Test Type:", ["FIT", "FIT-DNA (Cologuard)", "Colonoscopy", "Custom"])
+
+# Defaults
+if test_choice != "Custom":
+    sens_default = preset_tests[test_choice]["sens"]
+    spec_default = preset_tests[test_choice]["spec"]
 else:
-    sens_default, spec_default = 0.80, 0.90  # default for custom
+    sens_default = 0.80
+    spec_default = 0.90
 
-# ---------------------------
+# -----------------------------------------
 # SLIDERS
-# ---------------------------
-st.subheader("Test Parameters")
+# -----------------------------------------
+sens = st.slider("Sensitivity (%)", 1, 100, int(sens_default * 100)) / 100
+spec = st.slider("Specificity (%)", 1, 100, int(spec_default * 100)) / 100
+prev = st.slider("Prevalence (%)", 0.01, 40.0, 0.3) / 100  # up to 40%
 
-sens = st.slider("Sensitivity (%)", 1, 100, int(sens_default * 100),
-    help="Probability the test is positive if the disease is present.") / 100
+population = 100000
 
-spec = st.slider("Specificity (%)", 1, 100, int(spec_default * 100),
-    help="Probability the test is negative if the disease is absent.") / 100
+# -----------------------------------------
+# CORE CALCULATIONS
+# -----------------------------------------
+def calc_ppv(s, p, prev):
+    return (s * prev) / ((s * prev) + (1 - p) * (1 - prev))
 
-prev = st.slider("Prevalence (%)", 0.01, 40.0, 0.3,
-    help="Percent of the population with the disease.") / 100
+def calc_npv(s, p, prev):
+    return (p * (1 - prev)) / ((p * (1 - prev)) + (1 - s) * prev)
 
-population = 100000  # fixed population
+ppv = calc_ppv(sens, spec, prev)
+npv = calc_npv(sens, spec, prev)
 
-# ---------------------------
-# CORE FUNCTIONS
-# ---------------------------
-def ppv(sens, spec, prev):
-    return (sens * prev) / ((sens * prev) + (1 - spec) * (1 - prev))
-
-def npv(sens, spec, prev):
-    return (spec * (1 - prev)) / ((spec * (1 - prev)) + (1 - sens) * prev)
-
-# Calculations
-ppv_val = ppv(sens, spec, prev)
-npv_val = npv(sens, spec, prev)
-
-# 2×2 table components
+# 2×2 counts
 disease = population * prev
 no_disease = population - disease
 
@@ -96,89 +117,176 @@ FN = disease - TP
 TN = spec * no_disease
 FP = no_disease - TN
 
-# ---------------------------
-# COLOR CODING FUNCTION
-# ---------------------------
-def color_bar(value):
-    if value >= 0.80:
-        return "🟩 High"
-    elif value >= 0.40:
-        return "🟨 Moderate"
-    else:
+# -----------------------------------------
+# COLLAPSIBLE: PPV & NPV (open by default)
+# -----------------------------------------
+with st.expander("📊 PPV & NPV", expanded=True):
+
+    def interpret(v):
+        if v >= 0.80: return "🟩 High"
+        if v >= 0.40: return "🟨 Moderate"
         return "🟥 Low"
 
-# ---------------------------
-# DISPLAY RESULTS
-# ---------------------------
-st.subheader("Predictive Values")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("PPV", f"{ppv*100:.2f}%")
+        st.write(interpret(ppv))
+    with col2:
+        st.metric("NPV", f"{npv*100:.2f}%")
+        st.write(interpret(npv))
 
-colA, colB = st.columns(2)
-with colA:
-    st.metric("PPV (Positive Predictive Value)", f"{ppv_val*100:.2f}%")
-    st.write(color_bar(ppv_val))
-with colB:
-    st.metric("NPV (Negative Predictive Value)", f"{npv_val*100:.2f}%")
-    st.write(color_bar(npv_val))
+# -----------------------------------------
+# COLLAPSIBLE: 2x2 TABLE
+# -----------------------------------------
+with st.expander("🧪 2×2 Diagnostic Table"):
 
-# ---------------------------
-# 2×2 DIAGNOSTIC TABLE (Flipped)
-# ---------------------------
-st.subheader("2×2 Diagnostic Table")
+    st.write("This table shows TP, FP, FN, and TN counts in a population of 100,000.")
 
-table_data = {
-    "": ["Test +", "Test –", "Total"],
-    "Disease +": [f"{TP:.0f}", f"{FN:.0f}", f"{disease:.0f}"],
-    "Disease –": [f"{FP:.0f}", f"{TN:.0f}", f"{no_disease:.0f}"],
-    "Total": [f"{TP+FP:.0f}", f"{FN+TN:.0f}", f"{population}"]
-}
+    table = pd.DataFrame({
+        "Disease +": [f"{TP:.0f}", f"{FN:.0f}", f"{disease:.0f}"],
+        "Disease –": [f"{FP:.0f}", f"{TN:.0f}", f"{no_disease:.0f}"],
+        "Total": [f"{TP+FP:.0f}", f"{FN+TN:.0f}", f"{population}"]
+    }, index=["Test +", "Test –", "Total"])
 
-st.table(table_data)
+    st.table(table)
 
-# ---------------------------
-# VISUAL GRAPHS WITH MARKERS
-# ---------------------------
-st.subheader("Visualizing PPV & NPV Across Prevalence")
+    csv = table.to_csv(index=True).encode()
+    st.download_button("Download 2×2 Table (CSV)", csv, "2x2_table.csv")
 
-prev_range = np.linspace(0.0001, 0.40, 400)
-ppv_curve = ppv(sens, spec, prev_range)
-npv_curve = npv(sens, spec, prev_range)
+# -----------------------------------------
+# COLLAPSIBLE: LIKELIHOOD RATIOS
+# -----------------------------------------
+with st.expander("🧬 Likelihood Ratios (LR+ / LR–)"):
 
-fig, ax = plt.subplots(1, 2, figsize=(14, 5))
+    LR_pos = sens / (1 - spec)
+    LR_neg = (1 - sens) / spec
 
-# PPV graph
-ax[0].plot(prev_range * 100, ppv_curve * 100)
-ax[0].scatter(prev * 100, ppv_val * 100, s=80)
-ax[0].set_title("PPV vs Prevalence")
-ax[0].set_xlabel("Prelevance (%)")
-ax[0].set_ylim(0, 100)
+    st.write(f"**LR+ = {LR_pos:.2f}**")
+    st.write(f"**LR– = {LR_neg:.2f}**")
 
-# NPV graph
-ax[1].plot(prev_range * 100, npv_curve * 100)
-ax[1].scatter(prev * 100, npv_val * 100, s=80)
-ax[1].set_title("NPV vs Prevalence")
-ax[1].set_xlabel("Prevalence (%)")
-ax[1].set_ylim(0, 100)
+    def lr_interpret(val, pos=True):
+        if pos:
+            if val > 10: return "🟩 Strong evidence for disease"
+            elif val > 5: return "🟨 Moderate evidence"
+            else: return "🟥 Weak evidence"
+        else:
+            if val < 0.1: return "🟩 Strong evidence against disease"
+            elif val < 0.2: return "🟨 Moderate evidence"
+            else: return "🟥 Weak evidence"
 
-st.pyplot(fig)
+    st.write(lr_interpret(LR_pos, pos=True))
+    st.write(lr_interpret(LR_neg, pos=False))
 
-# ---------------------------
-# PDF DOWNLOAD
-# ---------------------------
-import io
-from reportlab.pdfgen import canvas
+# -----------------------------------------
+# COLLAPSIBLE: BAYESIAN POST-TEST PROBABILITY
+# -----------------------------------------
+with st.expander("🧮 Bayesian Post-Test Probability"):
 
-st.subheader("Export Summary")
+    st.write("Choose whether the test result was positive or negative:")
 
-if st.button("Download Summary as PDF"):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer)
-    c.drawString(100, 800, "Screening Test Summary")
-    c.drawString(100, 780, f"Test Type: {test_choice}")
-    c.drawString(100, 760, f"Sensitivity: {sens*100:.1f}%")
-    c.drawString(100, 740, f"Specificity: {spec*100:.1f}%")
-    c.drawString(100, 720, f"Prevalence: {prev*100:.2f}%")
-    c.drawString(100, 700, f"PPV: {ppv_val*100:.2f}%")
-    c.drawString(100, 680, f"NPV: {npv_val*100:.2f}%")
-    c.save()
-    st.download_button("Download PDF", data=buffer.getvalue(),
-                       file_name="summary.pdf", mime="application/pdf")
+    test_result = st.radio("Test Result:", ["Positive", "Negative"], horizontal=True)
+
+    if test_result == "Positive":
+        post = LR_pos * (prev / (1 - prev))
+    else:
+        post = LR_neg * (prev / (1 - prev))
+
+    post_prob = post / (1 + post)
+
+    st.metric("Post-Test Probability", f"{post_prob*100:.2f}%")
+
+# -----------------------------------------
+# COLLAPSIBLE: ROC CURVE
+# -----------------------------------------
+with st.expander("📈 ROC Curve"):
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.plot([0, 1], [0, 1], linestyle="--", color="gray")
+    ax.scatter(1 - spec, sens, s=120)
+    ax.set_xlabel("1 – Specificity")
+    ax.set_ylabel("Sensitivity")
+    ax.set_title("ROC Space Position")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    st.pyplot(fig)
+
+# -----------------------------------------
+# COLLAPSIBLE: PREVALENCE EXPLORER
+# -----------------------------------------
+with st.expander("🌍 Prevalence Explorer"):
+
+    ages = np.arange(20, 81)
+    age_prev = (ages - 20) / 100  # simple model: increases with age
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(ages, age_prev * 100)
+    ax.set_xlabel("Age")
+    ax.set_ylabel("Prevalence (%)")
+    ax.set_title("How Disease Prevalence Rises with Age")
+    st.pyplot(fig)
+
+# -----------------------------------------
+# COLLAPSIBLE: CASE EXAMPLES (C2)
+# -----------------------------------------
+with st.expander("👥 Case Examples"):
+
+    st.write("Select a real-world scenario:")
+
+    case = st.selectbox(
+        "Choose Case Example:",
+        [
+            "Population Screening (FIT)",
+            "Primary Care Symptomatic Patient",
+            "High-Risk GI Clinic (FIT-DNA)",
+            "Hospital Inpatient with Symptoms"
+        ]
+    )
+
+    if case == "Population Screening (FIT)":
+        sens = 0.75
+        spec = 0.95
+        prev = 0.003
+
+    elif case == "Primary Care Symptomatic Patient":
+        sens = 0.80
+        spec = 0.90
+        prev = 0.05
+
+    elif case == "High-Risk GI Clinic (FIT-DNA)":
+        sens = 0.92
+        spec = 0.87
+        prev = 0.12
+
+    elif case == "Hospital Inpatient with Symptoms":
+        sens = 0.95
+        spec = 0.99
+        prev = 0.25
+
+    st.write(f"**Updated Sensitivity:** {sens*100:.1f}%")
+    st.write(f"**Updated Specificity:** {spec*100:.1f}%")
+    st.write(f"**Updated Prevalence:** {prev*100:.2f}%")
+
+# -----------------------------------------
+# COLLAPSIBLE: DOWNLOADS
+# -----------------------------------------
+with st.expander("📥 Downloads"):
+
+    # ---- PDF ----
+    if st.button("Download Summary as PDF"):
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer)
+        c.drawString(100, 800, "Screening Test Summary")
+        c.drawString(100, 780, f"Sensitivity: {sens*100:.1f}%")
+        c.drawString(100, 760, f"Specificity: {spec*100:.1f}%")
+        c.drawString(100, 740, f"Prevalence: {prev*100:.2f}%")
+        c.drawString(100, 720, f"PPV: {calc_ppv(sens, spec, prev)*100:.2f}%")
+        c.drawString(100, 700, f"NPV: {calc_npv(sens, spec, prev)*100:.2f}%")
+        c.save()
+        st.download_button("Download PDF", data=buffer.getvalue(), file_name="summary.pdf", mime="application/pdf")
+
+    # ---- PNG Graph ----
+    fig2, ax2 = plt.subplots()
+    ax2.plot([1, 2, 3], [1, 2, 3])
+    png = io.BytesIO()
+    fig2.savefig(png, format="png")
+    st.download_button("Download Example Graph (PNG)", png.getvalue(), "graph.png", "image/png")
